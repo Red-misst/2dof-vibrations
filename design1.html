@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2-DOF Vibration Test Rig - Ultra Realistic</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Three.js and Addons -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/renderers/CSS2DRenderer.js"></script>
+    <!-- Dat.GUI for clean physics controls -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+    <style>
+        /* Add Back button style */
+        .back-button {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid #333;
+            color: #fff;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 14px;
+            pointer-events: auto;
+            backdrop-filter: blur(4px);
+            transition: all 0.2s ease;
+            cursor: pointer;
+            z-index: 1000;
+        }
+        .back-button:hover {
+            background: rgba(30, 41, 59, 0.9);
+            border-color: #475569;
+        }
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Inter', system-ui, sans-serif;
+            background-color: #050505; /* Studio dark background */
+        }
+        #canvas-container {
+            position: absolute;
+            top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1;
+        }
+        
+        /* CSS2D Label Styling - Ultra Crisp */
+        .part-label {
+            color: rgba(255, 255, 255, 0.95);
+            background: linear-gradient(135deg, rgba(15, 23, 42, 0.9) 0%, rgba(30, 41, 59, 0.9) 100%);
+            backdrop-filter: blur(8px);
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            font-size: 11px;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+            pointer-events: none; /* CRITICAL: Lets OrbitControls work */
+            white-space: nowrap;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+            transform: translate(-50%, -100%);
+            margin-top: -10px;
+            transition: opacity 0.3s;
+        }
+        
+        /* Thin line pointing down to the part */
+        .part-label::after {
+            content: '';
+            position: absolute;
+            bottom: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 1px;
+            height: 15px;
+            background: linear-gradient(to bottom, rgba(148, 163, 184, 0.6) 0%, transparent 100%);
+        }
+        
+        .dg.ac {
+            z-index: 10 !important;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-button">← Back to Menu</a>
+
+    <!-- 3D Canvas Container -->
+    <div id="canvas-container"></div>
+
+    <script>
+        // --- STREAMING_CHUNK:Initializing Physics State and Variables... ---
+        const sys = {
+            m1: 2.0,     // Mass 1 (kg)
+            m2: 1.5,     // Mass 2 (kg)
+            k1: 200.0,   // Stiffness 1 (N/m)
+            k2: 150.0,   // Stiffness 2 (N/m)
+            zeta: 0.03,  // Damping ratio of bearings
+            omega: 12.0, // Forcing frequency (rad/s)
+            F0_const: 0.5, // Eccentric unbalance force constant
+            
+            x1: 0.0,     // Displacement 1 (m)
+            x2: 0.0,     // Displacement 2 (m)
+            v1: 0.0,     // Velocity 1
+            v2: 0.0,     // Velocity 2
+            
+            time: 0.0,
+            
+            // Structural Layout parameters
+            wallPos: -8.0,
+            restPos1: -3.0,
+            restPos2: 3.0,
+            
+            hookY: 1.0,  // Exact height of all spring connection points (lowered to sit flush on plates)
+            cartLength: 2.4,
+            railSpacing: 1.8,
+            showLabels: true // Added toggle state for part names
+        };
+
+        // --- STREAMING_CHUNK:Setting up Three.js Renderers & Camera... ---
+        const container = document.getElementById('canvas-container');
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.1;
+        container.appendChild(renderer.domElement);
+
+        const labelRenderer = new THREE.CSS2DRenderer();
+        labelRenderer.setSize(window.innerWidth, window.innerHeight);
+        labelRenderer.domElement.style.position = 'absolute';
+        labelRenderer.domElement.style.top = '0px';
+        // CRITICAL FIX: Do NOT set pointerEvents to 'none' on the label container itself
+        // Otherwise OrbitControls attached to it won't work!
+        container.appendChild(labelRenderer.domElement);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a0a);
+        scene.fog = new THREE.FogExp2(0x0a0a0a, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 15, 25);
+
+        // Attach Controls to labelRenderer.domElement because it sits on top of the WebGL canvas
+        const controls = new THREE.OrbitControls(camera, labelRenderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.maxPolarAngle = Math.PI / 2 - 0.02; // Prevent going under table
+        controls.minDistance = 8;
+        controls.maxDistance = 40;
+        controls.target.set(0, 1, 0);
+
+        // --- STREAMING_CHUNK:Configuring Realistic Studio Lighting... ---
+        scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+
+        const mainLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        mainLight.position.set(10, 20, 15);
+        mainLight.castShadow = true;
+        mainLight.shadow.mapSize.width = 4096;
+        mainLight.shadow.mapSize.height = 4096;
+        mainLight.shadow.camera.near = 0.5;
+        mainLight.shadow.camera.far = 60;
+        const d = 15;
+        mainLight.shadow.camera.left = -d; mainLight.shadow.camera.right = d;
+        mainLight.shadow.camera.top = d; mainLight.shadow.camera.bottom = -d;
+        mainLight.shadow.bias = -0.0001;
+        scene.add(mainLight);
+        
+        const rimLight = new THREE.DirectionalLight(0xaaccff, 0.8);
+        rimLight.position.set(-15, 10, -15);
+        scene.add(rimLight);
+
+        const spotLight = new THREE.SpotLight(0xfff5e6, 1.5);
+        spotLight.position.set(0, 25, 0);
+        spotLight.angle = Math.PI / 3;
+        spotLight.penumbra = 0.5;
+        spotLight.castShadow = true;
+        scene.add(spotLight);
+
+        // --- STREAMING_CHUNK:Defining High-Fidelity Materials... ---
+        const mats = {
+            aluBrushed: new THREE.MeshStandardMaterial({ color: 0xd0d0d0, metalness: 0.8, roughness: 0.3 }),
+            steelShiny: new THREE.MeshStandardMaterial({ color: 0xeeeeee, metalness: 1.0, roughness: 0.1 }),
+            anodizedBlack: new THREE.MeshStandardMaterial({ color: 0x111111, metalness: 0.6, roughness: 0.4 }),
+            anodizedBlue: new THREE.MeshStandardMaterial({ color: 0x0044aa, metalness: 0.7, roughness: 0.2 }),
+            anodizedRed: new THREE.MeshStandardMaterial({ color: 0xaa1111, metalness: 0.7, roughness: 0.2 }),
+            brass: new THREE.MeshStandardMaterial({ color: 0xb5a642, metalness: 0.9, roughness: 0.2 }),
+            rubber: new THREE.MeshStandardMaterial({ color: 0x050505, metalness: 0.0, roughness: 0.9 }),
+            acrylic: new THREE.MeshPhysicalMaterial({ 
+                color: 0xffffff, metalness: 0.1, roughness: 0.05, 
+                transmission: 0.95, thickness: 0.1, transparent: true 
+            }),
+            laserRed: new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        };
+
+        const allLabels = []; // Array to store all labels for the toggle feature
+
+        function createLabel(text) {
+            const div = document.createElement('div');
+            div.className = 'part-label';
+            div.textContent = text;
+            const label = new THREE.CSS2DObject(div);
+            allLabels.push(label);
+            return label;
+        }
+
+        // Helper to create realistic steel eye-bolts for spring mounting
+        function createEyeBolt() {
+            const group = new THREE.Group();
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(0.08, 0.025, 16, 32), mats.steelShiny);
+            ring.position.y = 0.1;
+            // No rotation needed, hole faces the Z-axis (camera) perfectly allowing the spring to hook through
+            const base = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.1), mats.steelShiny);
+            base.position.y = 0.05;
+            group.add(ring);
+            group.add(base);
+            return group;
+        }
+
+        // --- STREAMING_CHUNK:Building the Optical Breadboard and Linear Rails... ---
+        const tableGroup = new THREE.Group();
+        
+        // Main Base Plate
+        const tableWidth = 26, tableLength = 8, tableThickness = 0.8;
+        const table = new THREE.Mesh(new THREE.BoxGeometry(tableWidth, tableThickness, tableLength), mats.anodizedBlack);
+        table.position.y = -tableThickness/2;
+        table.receiveShadow = true;
+        tableGroup.add(table);
+
+        // Table Grid pattern
+        const grid = new THREE.GridHelper(tableWidth, 52, 0x333333, 0x222222);
+        grid.position.y = 0.005;
+        tableGroup.add(grid);
+
+        // Linear Guide Rails
+        const railLength = 22;
+        const railRadius = 0.12;
+        const supportGeo = new THREE.BoxGeometry(railLength, 0.2, 0.3);
+        const shaftGeo = new THREE.CylinderGeometry(railRadius, railRadius, railLength, 32).rotateZ(Math.PI/2);
+
+        [-sys.railSpacing, sys.railSpacing].forEach((z, i) => {
+            // Aluminum Support
+            const support = new THREE.Mesh(supportGeo, mats.aluBrushed);
+            support.position.set(0, 0.1, z);
+            support.castShadow = true; support.receiveShadow = true;
+            tableGroup.add(support);
+            
+            // Hardened Steel Shaft
+            const shaft = new THREE.Mesh(shaftGeo, mats.steelShiny);
+            shaft.position.set(0, 0.2 + railRadius, z);
+            shaft.castShadow = true; shaft.receiveShadow = true;
+            tableGroup.add(shaft);
+
+            if(i === 0) shaft.add(createLabel("Hardened Steel Linear Rails"));
+
+            // Rubber Bumpers at ends
+            [-railLength/2, railLength/2].forEach(x => {
+                const bumper = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.4, 16).rotateZ(Math.PI/2), mats.rubber);
+                bumper.position.set(x + (x > 0 ? -0.2 : 0.2), 0.2 + railRadius, z);
+                bumper.castShadow = true;
+                tableGroup.add(bumper);
+            });
+        });
+
+        scene.add(tableGroup);
+
+        // Ground Stator (Fixed Wall for Spring 1)
+        const stator = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.8, 2.0), mats.anodizedBlack);
+        stator.position.set(sys.wallPos, 0.9, 0);
+        stator.castShadow = true; stator.receiveShadow = true;
+        
+        const statorHook = createEyeBolt();
+        statorHook.rotation.z = -Math.PI / 2; // Point outwards from the wall
+        statorHook.position.set(0.4, sys.hookY - 0.9, 0); // Local coord
+        stator.add(statorHook);
+        stator.add(createLabel("Rigid Ground Stator"));
+        scene.add(stator);
+
+        // --- STREAMING_CHUNK:Building High-Fidelity Mass Carriages... ---
+        function createCart(material, name, width, height) {
+            const group = new THREE.Group();
+            
+            // Base plate (main structural chassis)
+            const plateThickness = 0.2;
+            const plate = new THREE.Mesh(new THREE.BoxGeometry(sys.cartLength, plateThickness, sys.railSpacing * 2 + 1.2), mats.anodizedBlack);
+            plate.position.y = 0.8;
+            plate.castShadow = true; plate.receiveShadow = true;
+            group.add(plate);
+
+            // 4x Linear Bearings (mounted under the plate)
+            [-sys.cartLength/2 + 0.5, sys.cartLength/2 - 0.5].forEach(x => {
+                [-sys.railSpacing, sys.railSpacing].forEach(z => {
+                    const block = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.5, 0.8), mats.aluBrushed);
+                    block.position.set(x, 0.35, z);
+                    block.castShadow = true; block.receiveShadow = true;
+                    group.add(block);
+                });
+            });
+
+            // Main Mass Block (Centered, lower profile so it's not towering)
+            const massCube = new THREE.Mesh(new THREE.BoxGeometry(width, height, width), material);
+            massCube.position.set(0, 0.8 + plateThickness/2 + height/2, 0);
+            massCube.castShadow = true; massCube.receiveShadow = true;
+            massCube.add(createLabel(name));
+            group.add(massCube);
+
+            // Realistic Eye-Bolt Hooks securely mounted onto the base plate
+            const frontHook = createEyeBolt();
+            frontHook.position.set(sys.cartLength/2 - 0.15, 0.9, 0); 
+            group.add(frontHook);
+
+            const backHook = createEyeBolt();
+            backHook.position.set(-sys.cartLength/2 + 0.15, 0.9, 0);
+            group.add(backHook);
+
+            // High Precision Accelerometer Module (Fixed securely to the plate corner)
+            const daq = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.3), mats.aluBrushed);
+            // Positioned securely at the corner of the plate
+            daq.position.set(sys.cartLength/2 - 0.3, 0.8 + plateThickness/2 + 0.1, sys.railSpacing + 0.3);
+            
+            // Sensor wire detailing
+            const wire = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.4).rotateX(Math.PI/2), mats.rubber);
+            wire.position.set(0, 0, 0.2);
+            daq.add(wire);
+            
+            daq.add(createLabel("Accelerometer"));
+            group.add(daq);
+
+            return group;
+        }
+
+        const mass1Group = createCart(mats.anodizedBlue, "Mass 1 (m₁)", 1.4, 0.6);
+        scene.add(mass1Group);
+
+        const mass2Group = createCart(mats.anodizedRed, "Mass 2 (m₂)", 1.4, 0.6);
+        scene.add(mass2Group);
+
+        // --- STREAMING_CHUNK:Building the Motor and Eccentric Assembly... ---
+        // PS-Pad Style Rumble Motor (Small, clean, mounted flat on the plate of Mass 1)
+        const motorGroup = new THREE.Group();
+        // Mount it on the plate, offset in the Z direction so it sits neatly beside the main mass block
+        motorGroup.position.set(0, 0.9, -1.4); 
+        
+        // Motor Mount Bracket flat on the plate
+        const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.1, 0.8), mats.aluBrushed);
+        bracket.position.y = 0.05;
+        bracket.castShadow = true;
+        motorGroup.add(bracket);
+
+        // Compact DC Rumble Motor Body
+        const motorBody = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.8, 32).rotateX(Math.PI/2), mats.anodizedBlack);
+        motorBody.position.set(0, 0.3, 0);
+        motorBody.castShadow = true;
+        motorBody.add(createLabel("Rumble Motor"));
+        motorGroup.add(motorBody);
+
+        // Eccentric Assembly (Rotates)
+        const eccentricAssembly = new THREE.Group();
+        eccentricAssembly.position.set(0, 0.3, 0.45); // Mounted to the end of the motor shaft (+Z)
+        
+        // Semi-circular Eccentric Weight (like a real PS pad motor)
+        const eccMassGeo = new THREE.CylinderGeometry(0.3, 0.3, 0.2, 32, 1, false, 0, Math.PI);
+        eccMassGeo.rotateX(Math.PI/2); // Align rotation with the motor shaft (Z axis)
+        const eccMass = new THREE.Mesh(eccMassGeo, mats.brass);
+        eccMass.position.set(0, 0, 0); // Naturally pivots along its flat center axis
+        eccMass.castShadow = true;
+        eccMass.add(createLabel("Eccentric Weight"));
+        eccentricAssembly.add(eccMass);
+        
+        motorGroup.add(eccentricAssembly);
+        mass1Group.add(motorGroup);
+
+        // --- STREAMING_CHUNK:Building Realistic Coil Springs... ---
+        // Generates points straight along the X axis
+        class CoilCurve extends THREE.Curve {
+            constructor(scale = 1, radius = 0.18, coils = 12) { 
+                super(); this.scale = scale; this.radius = radius; this.coils = coils; 
+            }
+            getPoint(t, optionalTarget = new THREE.Vector3()) {
+                let fade = 1.0;
+                if (t < 0.05) fade = t / 0.05;
+                if (t > 0.95) fade = (1.0 - t) / 0.05;
+
+                let tx = t * this.scale;
+                let ty = this.radius * fade * Math.cos(t * this.coils * Math.PI * 2);
+                let tz = this.radius * fade * Math.sin(t * this.coils * Math.PI * 2);
+                return optionalTarget.set(tx, ty, tz);
+            }
+        }
+
+        function createSpringData(labelName) {
+            const curve = new CoilCurve(1);
+            const mesh = new THREE.Mesh(new THREE.BufferGeometry(), mats.steelShiny);
+            mesh.castShadow = true;
+            mesh.add(createLabel(labelName));
+            scene.add(mesh);
+            return { mesh, curve, numCoils: 28, wireThickness: 0.025 }; // Increased coils and realistic thickness
+        }
+
+        const spring1Data = createSpringData("Tension Spring (k₁)");
+        const spring2Data = createSpringData("Coupling Spring (k₂)");
+
+        function updateSpringGeometry(springInfo, startX, endX) {
+            const distance = endX - startX;
+            springInfo.curve.scale = distance;
+            
+            // Rebuild geometry to prevent wire stretching distortion
+            springInfo.mesh.geometry.dispose();
+            springInfo.mesh.geometry = new THREE.TubeGeometry(springInfo.curve, springInfo.numCoils * 12, springInfo.wireThickness, 8, false);
+            
+            springInfo.mesh.position.set(startX, sys.hookY, 0);
+            
+            // Center label on spring
+            if (springInfo.mesh.children.length > 0) {
+                springInfo.mesh.children[0].position.set(distance / 2, 0.5, 0);
+            }
+        }
+
+        // --- STREAMING_CHUNK:ESP32 DAQ and Dynamic Wiring... ---
+        const espGroup = new THREE.Group();
+        espGroup.position.set(sys.wallPos - 1.5, 0.0, 0.0); // Moved directly behind the stator
+        scene.add(espGroup);
+
+        // PCB Base
+        const pcb = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.05, 0.8), new THREE.MeshStandardMaterial({color: 0x114411, roughness: 0.8, metalness: 0.2}));
+        pcb.position.y = 0.025;
+        espGroup.add(pcb);
+        
+        // ESP-WROOM-32 metallic chip
+        const wifiChip = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.04, 0.5), mats.aluBrushed);
+        wifiChip.position.set(-0.3, 0.06, 0);
+        espGroup.add(wifiChip);
+
+        // Header pins block for wiring
+        const headers = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.1, 0.6), mats.anodizedBlack);
+        headers.position.set(0.4, 0.05, 0);
+        espGroup.add(headers);
+
+        espGroup.add(createLabel("ESP32 Microcontroller"));
+
+        // --- STREAMING_CHUNK:Sensors and Safety Enclosure... ---
+        // Optical Displacement Sensor targeting M2
+        const sensor = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.2, 0.8), mats.aluBrushed);
+        sensor.position.set(sys.restPos2 + 6.0, 0.6, 0);
+        sensor.castShadow = true;
+        const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.8, 16).rotateZ(Math.PI/2), mats.anodizedBlack);
+        lens.position.set(-0.2, 0.4, 0);
+        sensor.add(lens);
+        sensor.add(createLabel("Laser Displacement Sensor"));
+        scene.add(sensor);
+
+        // Laser Beam
+        const laserBeam = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 1, 8).rotateZ(Math.PI/2), mats.laserRed);
+        scene.add(laserBeam);
+
+        // Safety Enclosure (Perspex Box)
+        const enclosure = new THREE.Mesh(new THREE.BoxGeometry(25, 5, 6), mats.acrylic);
+        enclosure.position.set(0, 2.5, 0);
+        enclosure.add(createLabel("Perspex Safety Enclosure").translateY(2.5));
+        scene.add(enclosure);
+
+        // --- STREAMING_CHUNK:GUI and Interactive Controls... ---
+        const gui = new dat.GUI({ width: 300 });
+        gui.domElement.style.marginTop = '10px';
+        
+        const folderSys = gui.addFolder('System Properties');
+        folderSys.add(sys, 'm1', 0.5, 5.0).name('Mass 1 (kg)');
+        folderSys.add(sys, 'm2', 0.5, 5.0).name('Mass 2 (kg)');
+        folderSys.add(sys, 'k1', 50, 500).name('Stiffness 1 (N/m)');
+        folderSys.add(sys, 'k2', 50, 500).name('Stiffness 2 (N/m)');
+        folderSys.add(sys, 'zeta', 0.01, 0.2).name('Damping (ζ)');
+        folderSys.open();
+
+        const folderExc = gui.addFolder('Motor Excitation');
+        folderExc.add(sys, 'omega', 0, 25).name('Frequency (rad/s)');
+        folderExc.add(sys, 'F0_const', 0.1, 1.0).name('Unbalance Force');
+        folderExc.open();
+
+        const folderVis = gui.addFolder('Visualization');
+        folderVis.add(sys, 'showLabels').name('Show Part Names').onChange(v => {
+            allLabels.forEach(label => label.visible = v);
+        });
+        folderVis.open();
+
+        // --- STREAMING_CHUNK:Physics Engine and Animation Loop... ---
+        const clock = new THREE.Clock();
+
+        function updatePhysics(dt) {
+            if (dt > 0.05) dt = 0.05; // Prevent large steps on tab resume
+            sys.time += dt;
+
+            // Motor rotation (rotates in XY plane to generate X force)
+            eccentricAssembly.rotation.z = -sys.omega * sys.time;
+
+            // Excitation Force F(t)
+            const forceAmplitude = sys.F0_const * sys.omega * sys.omega;
+            const force = forceAmplitude * Math.cos(sys.omega * sys.time);
+            
+            // Damping coefficients
+            const c1 = 2 * sys.zeta * Math.sqrt(sys.k1 * sys.m1);
+            const c2 = 2 * sys.zeta * Math.sqrt(sys.k2 * sys.m2);
+
+            // Calculate internal forces
+            const F_s1 = sys.k1 * sys.x1;
+            const F_d1 = c1 * sys.v1;
+            
+            const F_s2 = sys.k2 * (sys.x1 - sys.x2);
+            const F_d2 = c2 * (sys.v1 - sys.v2);
+
+            // Newton's Second Law
+            const a1 = (force - F_s1 - F_d1 - F_s2 - F_d2) / sys.m1;
+            const a2 = (F_s2 + F_d2) / sys.m2;
+
+            // Integration (Semi-Implicit Euler)
+            sys.v1 += a1 * dt;
+            sys.v2 += a2 * dt;
+            sys.x1 += sys.v1 * dt;
+            sys.x2 += sys.v2 * dt;
+
+            // Hard limits (Bumpers) calculation
+            const maxTravel = 7.0; // Distance from center
+            if (sys.restPos1 + sys.x1 < -maxTravel) { sys.v1 *= -0.5; sys.x1 = -maxTravel - sys.restPos1; }
+            if (sys.restPos2 + sys.x2 > maxTravel) { sys.v2 *= -0.5; sys.x2 = maxTravel - sys.restPos2; }
+
+            // Update 3D object positions
+            const worldX1 = sys.restPos1 + sys.x1;
+            const worldX2 = sys.restPos2 + sys.x2;
+
+            mass1Group.position.x = worldX1;
+            mass2Group.position.x = worldX2;
+
+            // Update Spring Geometries
+            const statorHookX = sys.wallPos + 0.5;
+            const m1BackHookX = worldX1 - sys.cartLength/2 + 0.15; // Adjusted for eye-bolt offset
+            updateSpringGeometry(spring1Data, statorHookX, m1BackHookX);
+
+            const m1FrontHookX = worldX1 + sys.cartLength/2 - 0.15;
+            const m2BackHookX = worldX2 - sys.cartLength/2 + 0.15;
+            updateSpringGeometry(spring2Data, m1FrontHookX, m2BackHookX);
+
+            // Update Laser Beam Visuals
+            const laserOriginX = sensor.position.x - 0.6;
+            const targetX = worldX2 + sys.cartLength/2;
+            const distance = laserOriginX - targetX;
+            laserBeam.scale.x = distance;
+            laserBeam.position.set(laserOriginX - distance/2, 1.0, 0);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            labelRenderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta();
+            
+            updatePhysics(dt);
+            controls.update();
+            
+            renderer.render(scene, camera);
+            labelRenderer.render(scene, camera);
+        }
+
+        animate();
+    </script>
+</body>
+</html>

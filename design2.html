@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>1-DOF Vibration Test Rig</title>
+    <!-- Add Import Map to resolve bare module specifiers -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #111;
+            font-family: 'Inter', sans-serif;
+            user-select: none;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #ffffff;
+            pointer-events: none;
+            background: rgba(10, 10, 10, 0.75);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            backdrop-filter: blur(4px);
+            box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            font-size: 1.2rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            color: #e2e8f0;
+        }
+        p {
+            margin: 5px 0;
+            font-size: 0.85rem;
+            color: #94a3b8;
+            line-height: 1.4;
+        }
+        .highlight {
+            color: #38bdf8;
+            font-family: monospace;
+            font-size: 0.95rem;
+        }
+        #oscilloscope {
+            margin-top: 15px;
+            width: 250px;
+            height: 80px; /* Increased height for two traces */
+            background: #000;
+            border: 1px solid #333;
+            border-radius: 4px;
+            position: relative;
+            overflow: hidden;
+        }
+        #trace {
+            position: absolute;
+            top: 50%;
+            left: 0;
+            width: 8px;
+            height: 8px;
+            background: #38bdf8;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 6px #38bdf8;
+        }
+        #trace2 {
+            position: absolute;
+            top: 50%;
+            left: 0;
+            width: 8px;
+            height: 8px;
+            background: #f59e0b;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 6px #f59e0b;
+        }
+        .part-label {
+            color: #f8fafc;
+            font-family: 'Inter', sans-serif;
+            font-size: 11px;
+            padding: 4px 8px;
+            background: rgba(15, 23, 42, 0.85);
+            border: 1px solid #475569;
+            border-radius: 4px;
+            pointer-events: none;
+            white-space: nowrap;
+            margin-top: -10px;
+            text-shadow: 0 1px 2px #000;
+            backdrop-filter: blur(4px);
+        }
+        .part-label::before {
+            content: '';
+            position: absolute;
+            top: 100%;
+            left: 50%;
+            width: 1px;
+            height: 15px;
+            background: #94a3b8;
+        }
+        /* Add Back button style */
+        .back-button {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid #333;
+            color: #fff;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 14px;
+            pointer-events: auto;
+            backdrop-filter: blur(4px);
+            transition: all 0.2s ease;
+            cursor: pointer;
+            z-index: 1000;
+        }
+        .back-button:hover {
+            background: rgba(30, 41, 59, 0.9);
+            border-color: #475569;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-button">← Back to Menu</a>
+    <div id="ui-layer">
+        <h1>2-DOF Vibration Analysis</h1>
+        <p>Coupled Free Vibration Test</p>
+        <p style="font-size: 0.8rem; margin-top: 10px;">M₁ (Top, Blue): <span class="highlight" id="y1-readout">0.0</span> mm</p>
+        <p style="font-size: 0.8rem;">M₂ (Bot, Orng): <span style="color:#f59e0b; font-family:monospace;" id="y2-readout">0.0</span> mm</p>
+        <div id="oscilloscope">
+            <div id="trace"></div>
+            <div id="trace2"></div>
+        </div>
+        <p style="margin-top: 10px; font-size: 0.75rem; color: #64748b;">Action: Drag either central mass vertically and release.</p>
+        <p style="margin-top: 5px; font-size: 0.75rem; color: #64748b;">Left Click Background: Rotate | Scroll: Zoom</p>
+    </div>
+    <div id="canvas-container"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+        import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+        let scene, camera, renderer, controls, labelRenderer;
+        let clock;
+        
+        // Mechanical Groups
+        const staticGroup = new THREE.Group();
+        const movingGroup1 = new THREE.Group(); // Mass 1 (Top)
+        const movingGroup2 = new THREE.Group(); // Mass 2 (Bottom)
+        
+        // Dynamic elements for animation loop
+        const topSprings = [];
+        const botSprings = [];
+        let cableMesh1, cableCurve1;
+        let cableMesh2, cableCurve2;
+        const traceElement1 = document.getElementById('trace');
+        const traceElement2 = document.getElementById('trace2');
+        const y1Readout = document.getElementById('y1-readout');
+        const y2Readout = document.getElementById('y2-readout');
+        
+        // Physics Parameters (2-DOF System)
+        const m1 = 1.0, m2 = 1.0;          // Masses (kg)
+        const k1 = 200.0, k2 = 180.0;      // Spring constants (N/m)
+        const c1 = 1.5, c2 = 1.0;          // Damping coefficients (N·s/m)
+        
+        const mass1RestY = 6.5; // Raised from 4.5
+        const mass2RestY = 3.0; // Raised from 1.5
+        const springRestLength = 2.4; // Base value, modified dynamically during build
+
+        // Interaction State
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const intersectPoint = new THREE.Vector3();
+        const dragPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+        let dragTarget = null; // 1 or 2
+        let dragOffset = 0;
+        
+        // Kinematic variables
+        let y1 = 0, v1 = 0;
+        let y2 = 0, v2 = 0;
+        let prev_y1 = 0, prev_y2 = 0; // Track for accurate manual drag velocity
+
+        class HelixCurve extends THREE.Curve {
+            constructor(radius, height, turns) {
+                super();
+                this.radius = radius;
+                this.height = height;
+                this.turns = turns;
+            }
+            getPoint(t, optionalTarget = new THREE.Vector3()) {
+                const angle = t * Math.PI * 2 * this.turns;
+                const x = this.radius * Math.cos(angle);
+                const z = this.radius * Math.sin(angle);
+                const y = t * this.height;
+                return optionalTarget.set(x, y, z);
+            }
+        }
+
+        init();
+        animate();
+
+        function init() {
+            const container = document.getElementById('canvas-container');
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.0;
+            container.appendChild(renderer.domElement);
+
+            // Initialize CSS2D Renderer for 3D Labels
+            labelRenderer = new CSS2DRenderer();
+            labelRenderer.setSize(window.innerWidth, window.innerHeight);
+            labelRenderer.domElement.style.position = 'absolute';
+            labelRenderer.domElement.style.top = '0px';
+            labelRenderer.domElement.style.pointerEvents = 'none'; // Allow OrbitControls to pass through
+            document.body.appendChild(labelRenderer.domElement);
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a1a);
+            clock = new THREE.Clock();
+
+            // PBR Environment Map for photorealistic metals
+            const pmremGenerator = new THREE.PMREMGenerator(renderer);
+            scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(8, 6, 12); // Moved camera back and up for taller frame
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.target.set(0, 5, 0); // Raised camera target point
+            controls.maxPolarAngle = Math.PI / 2 - 0.05; // Prevent camera going below ground
+            controls.minDistance = 2;
+            controls.maxDistance = 20;
+
+            // Lighting Setup (Studio 3-Point)
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(5, 10, 5);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            dirLight.shadow.camera.near = 0.5;
+            dirLight.shadow.camera.far = 25;
+            dirLight.shadow.camera.left = -5;
+            dirLight.shadow.camera.right = 5;
+            dirLight.shadow.camera.top = 7;
+            dirLight.shadow.camera.bottom = -2;
+            dirLight.shadow.bias = -0.001;
+            scene.add(dirLight);
+
+            const pointLight = new THREE.PointLight(0xd4af37, 0.5, 10);
+            pointLight.position.set(-2, 4, -2);
+            scene.add(pointLight);
+
+            const groundGeo = new THREE.PlaneGeometry(50, 50);
+            const groundMat = new THREE.MeshStandardMaterial({ 
+                color: 0x111111, 
+                roughness: 0.8, 
+                metalness: 0.2 
+            });
+            const ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+            gridHelper.position.y = 0.01;
+            scene.add(gridHelper);
+
+            // Add Base Plate (Steel)
+            const basePlateGeo = new THREE.BoxGeometry(4.0, 0.2, 3.0);
+            const matDarkIron = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, metalness: 0.85, roughness: 0.4 });
+            const basePlate = new THREE.Mesh(basePlateGeo, matDarkIron);
+            basePlate.position.set(0, 0.1, 0);
+            basePlate.castShadow = true;
+            basePlate.receiveShadow = true;
+            staticGroup.add(basePlate);
+
+            scene.add(staticGroup);
+            
+            movingGroup1.position.y = mass1RestY;
+            scene.add(movingGroup1);
+            
+            movingGroup2.position.y = mass2RestY;
+            scene.add(movingGroup2);
+
+            buildFrame();
+            buildGuidanceSystem();
+            
+            // Build the two masses
+            buildMassBlock(movingGroup1, "Mass Block 1 (M₁)");
+            buildMassBlock(movingGroup2, "Mass Block 2 (M₂)");
+            
+            // Build Springs (adjusted top Y anchor to match taller frame)
+            buildSprings(topSprings, staticGroup, movingGroup1, 9.76, 0.34, true); // Frame to M1
+            buildSprings(botSprings, movingGroup1, movingGroup2, -0.34, 0.34, false); // M1 to M2
+            
+            // Build Dampers (adjusted top Y anchor)
+            buildDamper(staticGroup, movingGroup1, 9.8, 0.3); // Frame to M1
+            buildDamper(movingGroup1, movingGroup2, -0.3, 0.3); // M1 to M2
+            
+            // Build Instrumentation
+            buildInstrumentation(movingGroup1, 1);
+            buildInstrumentation(movingGroup2, 2);
+            
+            // Build Scales aligned with pointer resting height (massRestY + 0.35 offset)
+            buildScale(movingGroup1, mass1RestY + 0.35);
+            buildScale(movingGroup2, mass2RestY + 0.35);
+
+            window.addEventListener('resize', onWindowResize);
+            
+            // Add interaction listeners for manual pulling
+            renderer.domElement.addEventListener('pointerdown', onPointerDown);
+            window.addEventListener('pointermove', onPointerMove);
+            window.addEventListener('pointerup', onPointerUp);
+        }
+
+        // Helper to create attachable floating text labels
+        function createLabel(text, yOffset = 0) {
+            const div = document.createElement('div');
+            div.className = 'part-label';
+            div.textContent = text;
+            const label = new CSS2DObject(div);
+            label.position.set(0, yOffset, 0);
+            return label;
+        }
+
+        function buildScale(targetGroup, yBase) {
+            const scaleGroup = new THREE.Group();
+            scaleGroup.position.set(-1.25, yBase, 0.4); 
+            
+            // White plate for the ruler
+            const plateGeo = new THREE.BoxGeometry(0.15, 2.2, 0.05);
+            const plateMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 });
+            const plate = new THREE.Mesh(plateGeo, plateMat);
+            scaleGroup.add(plate);
+
+            // Tick marks
+            const tickMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+            for(let i = -10; i <= 10; i++) {
+                const isMajor = i % 5 === 0;
+                const tickGeo = new THREE.BoxGeometry(isMajor ? 0.1 : 0.05, 0.015, 0.06);
+                const tick = new THREE.Mesh(tickGeo, tickMat);
+                tick.position.set(isMajor ? 0.025 : 0.05, i * 0.1, 0);
+                scaleGroup.add(tick);
+            }
+            
+            const topLabel = createLabel("+100 mm", 1.1);
+            const botLabel = createLabel("-100 mm", -1.1);
+            scaleGroup.add(topLabel, botLabel);
+            
+            staticGroup.add(scaleGroup);
+
+            // Red pointer attached to the moving mass
+            const pointerGeo = new THREE.ConeGeometry(0.04, 0.15, 4);
+            const pointerMat = new THREE.MeshStandardMaterial({ color: 0xe91e63, roughness: 0.4, metalness: 0.1 });
+            const pointer = new THREE.Mesh(pointerGeo, pointerMat);
+            pointer.rotation.z = -Math.PI / 2;
+            pointer.position.set(-1.05, 0.35, 0.4); 
+            pointer.castShadow = true;
+            
+            targetGroup.add(pointer);
+        }
+
+        function onPointerDown(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            
+            const intersects1 = raycaster.intersectObjects(movingGroup1.children, true);
+            const intersects2 = raycaster.intersectObjects(movingGroup2.children, true);
+            
+            let hitIntersect = null;
+            if (intersects1.length > 0) {
+                dragTarget = 1;
+                hitIntersect = intersects1[0];
+            } else if (intersects2.length > 0) {
+                dragTarget = 2;
+                hitIntersect = intersects2[0];
+            }
+
+            if (hitIntersect) {
+                controls.enabled = false;
+                document.body.style.cursor = 'grabbing';
+                
+                dragPlane.setFromNormalAndCoplanarPoint(
+                    camera.getWorldDirection(dragPlane.normal),
+                    hitIntersect.point
+                );
+                
+                if(raycaster.ray.intersectPlane(dragPlane, intersectPoint)) {
+                    dragOffset = (dragTarget === 1 ? movingGroup1.position.y : movingGroup2.position.y) - intersectPoint.y;
+                }
+            }
+        }
+
+        function onPointerMove(event) {
+            if (!dragTarget) {
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                raycaster.setFromCamera(mouse, camera);
+                const i1 = raycaster.intersectObjects(movingGroup1.children, true);
+                const i2 = raycaster.intersectObjects(movingGroup2.children, true);
+                document.body.style.cursor = (i1.length > 0 || i2.length > 0) ? 'grab' : 'default';
+                return;
+            }
+            
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            
+            if (raycaster.ray.intersectPlane(dragPlane, intersectPoint)) {
+                let newY = intersectPoint.y + dragOffset;
+                if (dragTarget === 1) {
+                    y1 = Math.max(Math.min(newY - mass1RestY, 1.0), -1.0);
+                    v1 = 0; // Reset velocity during drag
+                } else {
+                    y2 = Math.max(Math.min(newY - mass2RestY, 1.0), -1.0);
+                    v2 = 0;
+                }
+            }
+        }
+
+        function onPointerUp(event) {
+            if (dragTarget) {
+                dragTarget = null;
+                controls.enabled = true;
+                document.body.style.cursor = 'default';
+            }
+        }
+
+        function create4040Extrusion(length) {
+            const s = 0.2; // Half size (40mm -> 0.4 units)
+            const w = 0.04; // Slot width
+            const d = 0.06; // Slot depth
+            
+            const shape = new THREE.Shape();
+            shape.moveTo(s, s);
+            // Right edge
+            shape.lineTo(s, w); shape.lineTo(s - d, w); shape.lineTo(s - d, -w); shape.lineTo(s, -w); shape.lineTo(s, -s);
+            // Bottom edge
+            shape.lineTo(w, -s); shape.lineTo(w, -s + d); shape.lineTo(-w, -s + d); shape.lineTo(-w, -s); shape.lineTo(-s, -s);
+            // Left edge
+            shape.lineTo(-s, -w); shape.lineTo(-s + d, -w); shape.lineTo(-s + d, w); shape.lineTo(-s, w); shape.lineTo(-s, s);
+            // Top edge
+            shape.lineTo(-w, s); shape.lineTo(-w, s - d); shape.lineTo(w, s - d); shape.lineTo(w, s); shape.lineTo(s, s);
+
+            const extrudeSettings = { depth: length, bevelEnabled: true, bevelSegments: 2, steps: 1, bevelSize: 0.005, bevelThickness: 0.005 };
+            const geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+            geo.translate(0, 0, -length / 2); // Center along Z axis
+            
+            const matAlu = new THREE.MeshStandardMaterial({ color: 0xc0c0c0, metalness: 0.95, roughness: 0.25 });
+            const mesh = new THREE.Mesh(geo, matAlu);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            return mesh;
+        }
+
+        function buildFrame() {
+            // Uprights (Increased length to 10.0 and shifted up)
+            const leftUpright = create4040Extrusion(10.0);
+            leftUpright.rotation.x = Math.PI / 2;
+            leftUpright.position.set(-1.5, 5.0, 0);
+            
+            const rightUpright = create4040Extrusion(10.0);
+            rightUpright.rotation.x = Math.PI / 2;
+            rightUpright.position.set(1.5, 5.0, 0);
+
+            // Top Crossbar (Moved up to 10.0)
+            const topBar = create4040Extrusion(3.4);
+            topBar.rotation.y = Math.PI / 2;
+            topBar.position.set(0, 10.0, 0);
+
+            const frameLabel = createLabel("4040 Extruded Aluminum Frame", 0.3);
+            topBar.add(frameLabel);
+
+            staticGroup.add(leftUpright, rightUpright, topBar);
+        }
+
+        function buildGuidanceSystem() {
+            const matPolishedSteel = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 1.0, roughness: 0.1 });
+            // Longer shafts to match the taller frame
+            const shaftGeo = new THREE.CylinderGeometry(0.08, 0.08, 9.8, 32);
+            
+            const leftShaft = new THREE.Mesh(shaftGeo, matPolishedSteel);
+            leftShaft.position.set(-1.0, 5.0, 0);
+            leftShaft.castShadow = true;
+            leftShaft.receiveShadow = true;
+            
+            const rightShaft = new THREE.Mesh(shaftGeo, matPolishedSteel);
+            rightShaft.position.set(1.0, 5.0, 0);
+            rightShaft.receiveShadow = true;
+
+            const shaftLabel = createLabel("Hardened Steel Guide Shafts", 1.5);
+            rightShaft.add(shaftLabel);
+
+            staticGroup.add(leftShaft, rightShaft);
+        }
+
+        function buildMassBlock(group, labelText) {
+            const matBrushedMetal = new THREE.MeshStandardMaterial({ color: 0x4a4a4a, metalness: 0.85, roughness: 0.4 });
+            
+            const mShape = new THREE.Shape();
+            const w = 0.8, h = 0.3, c = 0.05; 
+            mShape.moveTo(w-c, h);
+            mShape.lineTo(-(w-c), h); mShape.lineTo(-w, h-c);
+            mShape.lineTo(-w, -(h-c)); mShape.lineTo(-(w-c), -h);
+            mShape.lineTo(w-c, -h); mShape.lineTo(w, -(h-c));
+            mShape.lineTo(w, h-c); mShape.lineTo(w-c, h);
+            
+            const extrudeSettings = { depth: 1.0, bevelEnabled: true, bevelSize: 0.01, bevelThickness: 0.01 };
+            const massGeo = new THREE.ExtrudeGeometry(mShape, extrudeSettings);
+            massGeo.translate(0, 0, -0.5); 
+
+            const massMesh = new THREE.Mesh(massGeo, matBrushedMetal);
+            massMesh.castShadow = true;
+            massMesh.receiveShadow = true;
+            
+            const massLabel = createLabel(labelText, 0.5);
+            massMesh.add(massLabel);
+            
+            group.add(massMesh);
+
+            const carriageGeo = new THREE.BoxGeometry(0.4, 0.7, 0.4);
+            const matDarkIron = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.7, roughness: 0.5 });
+            
+            const leftCarriage = new THREE.Mesh(carriageGeo, matDarkIron);
+            leftCarriage.position.set(-1.0, 0, 0);
+            leftCarriage.castShadow = true;
+            
+            const rightCarriage = new THREE.Mesh(carriageGeo, matDarkIron);
+            rightCarriage.position.set(1.0, 0, 0);
+            rightCarriage.castShadow = true;
+
+            const plateGeo = new THREE.BoxGeometry(0.5, 0.1, 0.4);
+            const matAdapter = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.9, roughness: 0.4 });
+            
+            const leftPlate = new THREE.Mesh(plateGeo, matAdapter);
+            leftPlate.position.set(-0.8, 0.35, 0); 
+            const rightPlate = new THREE.Mesh(plateGeo, matAdapter);
+            rightPlate.position.set(0.8, 0.35, 0);
+
+            const boltGeo = new THREE.CylinderGeometry(0.04, 0.04, 0.05, 6);
+            const boltMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.9, roughness: 0.2 });
+            for(let x of [-0.15, 0.15]) {
+                for(let z of [-0.1, 0.1]) {
+                    const lBolt = new THREE.Mesh(boltGeo, boltMat);
+                    lBolt.position.set(x, 0.05, z);
+                    leftPlate.add(lBolt);
+                    const rBolt = new THREE.Mesh(boltGeo, boltMat);
+                    rBolt.position.set(x, 0.05, z);
+                    rightPlate.add(rBolt);
+                }
+            }
+
+            group.add(leftCarriage, rightCarriage, leftPlate, rightPlate);
+        }
+
+        function buildSprings(springArray, topParent, bottomParent, topMountY, bottomMountY, isTop) {
+            const matSpring = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.9, roughness: 0.3 });
+            // Calculated resting distance between the specific cup mounts in the taller configuration
+            const rLen = isTop ? 2.92 : 2.82; 
+            const helix = new HelixCurve(0.12, rLen, 12); 
+            const tubeGeo = new THREE.TubeGeometry(helix, 150, 0.015, 8, false);
+
+            const leftSpring = new THREE.Mesh(tubeGeo, matSpring);
+            leftSpring.position.set(-0.5, 0, 0); 
+            leftSpring.castShadow = true;
+            
+            const rightSpring = new THREE.Mesh(tubeGeo.clone(), matSpring);
+            rightSpring.position.set(0.5, 0, 0);
+            rightSpring.castShadow = true;
+
+            leftSpring.userData.originalPositions = new Float32Array(tubeGeo.attributes.position.array);
+            leftSpring.userData.restLength = rLen;
+            rightSpring.userData.originalPositions = new Float32Array(tubeGeo.attributes.position.array);
+            rightSpring.userData.restLength = rLen;
+
+            scene.add(leftSpring, rightSpring);
+            springArray.push(leftSpring, rightSpring);
+            
+            const cupGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.08, 32);
+            const cupMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.8, roughness: 0.6 });
+            
+            const leftTopCup = new THREE.Mesh(cupGeo, cupMat);
+            leftTopCup.position.set(-0.5, topMountY, 0);
+            const rightTopCup = new THREE.Mesh(cupGeo, cupMat);
+            rightTopCup.position.set(0.5, topMountY, 0);
+            topParent.add(leftTopCup, rightTopCup);
+
+            const leftBotCup = new THREE.Mesh(cupGeo, cupMat);
+            leftBotCup.position.set(-0.5, bottomMountY, 0);
+            const rightBotCup = new THREE.Mesh(cupGeo, cupMat);
+            rightBotCup.position.set(0.5, bottomMountY, 0);
+            bottomParent.add(leftBotCup, rightBotCup);
+        }
+
+        // Helper to generate a mechanical U-bracket with a joining pin
+        function createUBracketClevis() {
+            const group = new THREE.Group();
+            const mat = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.8, roughness: 0.5 });
+            const base = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.05, 0.18), mat);
+            const armL = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.15, 0.18), mat);
+            armL.position.set(-0.07, 0.1, 0);
+            const armR = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.15, 0.18), mat);
+            armR.position.set(0.07, 0.1, 0);
+            const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.22), new THREE.MeshStandardMaterial({color: 0xcccccc, metalness: 1.0, roughness: 0.2}));
+            pin.rotation.z = Math.PI / 2;
+            pin.position.set(0, 0.12, 0);
+            group.add(base, armL, armR, pin);
+            return group;
+        }
+
+        function buildDamper(topParent, botParent, topY, botY) {
+            // Lengthened sleeves and rods to ensure continuous overlap at the new larger gaps
+            const sleeveLen = 2.8;
+            const rodLen = 2.2;
+
+            const matTranslucent = new THREE.MeshStandardMaterial({ 
+                color: 0x88ccff, transparent: true, opacity: 0.3, metalness: 0.2, roughness: 0.1, side: THREE.DoubleSide
+            });
+            const outerGeo = new THREE.CylinderGeometry(0.12, 0.12, sleeveLen, 32, 1, true); 
+            const outerMesh = new THREE.Mesh(outerGeo, matTranslucent);
+            outerMesh.position.set(0, topY - (sleeveLen / 2), 0); 
+            topParent.add(outerMesh);
+
+            const upperClevis = createUBracketClevis();
+            upperClevis.rotation.x = Math.PI; 
+            upperClevis.position.set(0, topY, 0);
+            topParent.add(upperClevis);
+
+            const matPolishedSteel = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 1.0, roughness: 0.1 });
+            const innerGeo = new THREE.CylinderGeometry(0.1, 0.1, rodLen, 32);
+            const innerMesh = new THREE.Mesh(innerGeo, matPolishedSteel);
+            innerMesh.position.set(0, botY + (rodLen / 2), 0); 
+            
+            const eyeletGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.06, 16);
+            const eyeletMesh = new THREE.Mesh(eyeletGeo, matPolishedSteel);
+            eyeletMesh.rotation.z = Math.PI / 2;
+            eyeletMesh.position.set(0, -(rodLen / 2), 0);
+            innerMesh.add(eyeletMesh);
+
+            botParent.add(innerMesh);
+            
+            const lowerClevis = createUBracketClevis();
+            lowerClevis.position.set(0, botY, 0);
+            botParent.add(lowerClevis);
+        }
+
+        function buildInstrumentation(group, id) {
+            const matBrass = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 1.0, roughness: 0.2 });
+            const matChrome = new THREE.MeshStandardMaterial({ color: 0xeeeeee, metalness: 1.0, roughness: 0.1 });
+            
+            const sensorGroup = new THREE.Group();
+            sensorGroup.position.set(0.6, 0.3, 0.3); 
+
+            const hexGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.04, 6);
+            const hexMesh = new THREE.Mesh(hexGeo, matBrass);
+            hexMesh.position.y = 0.02;
+            sensorGroup.add(hexMesh);
+
+            const bodyGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.15, 32);
+            const bodyMesh = new THREE.Mesh(bodyGeo, matChrome);
+            bodyMesh.position.y = 0.115;
+            sensorGroup.add(bodyMesh);
+
+            const sensorLabel = createLabel(`Accel A${id}`, 0.2);
+            sensorGroup.add(sensorLabel);
+
+            group.add(sensorGroup);
+
+            // Re-route cables based on the new heights so they seamlessly touch the ground plane
+            const curve = new THREE.CatmullRomCurve3([
+                new THREE.Vector3(0.6, 0, 0.3), 
+                new THREE.Vector3(1.2, -0.5, 1.0),
+                new THREE.Vector3(2.5, (id === 1 ? -6.4 : -2.9), 2.0) 
+            ]);
+
+            const cableGeo = new THREE.TubeGeometry(curve, 20, 0.015, 8, false);
+            const cableMat = new THREE.MeshStandardMaterial({ color: (id===1 ? 0x1111ff : 0xff8811), roughness: 0.9, metalness: 0.1 });
+            const mesh = new THREE.Mesh(cableGeo, cableMat);
+            mesh.castShadow = true;
+            scene.add(mesh);
+
+            if (id === 1) {
+                cableMesh1 = mesh;
+                cableCurve1 = curve;
+            } else {
+                cableMesh2 = mesh;
+                cableCurve2 = curve;
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            labelRenderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Time step capped at 20ms to prevent integrator blowups on tab-switch
+            const dt = Math.min(clock.getDelta(), 0.02); 
+            
+            // Physics Engine: 2-DOF Numerical Integration (Semi-Implicit Euler)
+            const F1 = -k1 * y1 - c1 * v1 + k2 * (y2 - y1) + c2 * (v2 - v1);
+            const F2 = -k2 * (y2 - y1) - c2 * (v2 - v1);
+
+            if (dragTarget === 1) {
+                v1 = dt > 0 ? (y1 - prev_y1) / dt : 0; // Transmit manual velocity for realistic damping pull
+            } else {
+                v1 += (F1 / m1) * dt;
+                y1 += v1 * dt;
+            }
+
+            if (dragTarget === 2) {
+                v2 = dt > 0 ? (y2 - prev_y2) / dt : 0;
+            } else {
+                v2 += (F2 / m2) * dt;
+                y2 += v2 * dt;
+            }
+            
+            prev_y1 = y1;
+            prev_y2 = y2;
+
+            // 3. Apply exact spatial translation
+            movingGroup1.position.y = mass1RestY + y1;
+            movingGroup2.position.y = mass2RestY + y2;
+
+            // 4. Update UI Oscilloscope Trace
+            y1Readout.innerText = (y1 * 100).toFixed(1);
+            y2Readout.innerText = (y2 * 100).toFixed(1);
+
+            const totalTime = clock.getElapsedTime();
+            const loopDuration = 3.0;
+            const sweepTime = totalTime % loopDuration;
+            const traceX = (sweepTime / loopDuration) * 100;
+            
+            traceElement1.style.left = `${traceX}%`;
+            traceElement1.style.top = `${50 - (y1 / 1.0) * 40}%`;
+            
+            traceElement2.style.left = `${traceX}%`;
+            traceElement2.style.top = `${50 - (y2 / 1.0) * 40}%`;
+
+            // 5. Procedurally deform Spring geometries seamlessly
+            // Top Springs (Fixed Frame to Mass 1)
+            topSprings.forEach(spring => {
+                const pos = spring.geometry.attributes.position;
+                const orig = spring.userData.originalPositions;
+                const rLen = spring.userData.restLength;
+                
+                const bottomY = mass1RestY + y1 + 0.34;
+                const topY = 9.76; // Taller top mount anchor
+                const currentLength = topY - bottomY;
+                
+                spring.position.y = bottomY; // Anchor precisely to moving cup
+                
+                for (let i = 0; i < pos.count; i++) {
+                    const idx = i * 3 + 1;
+                    const originalY = orig[idx];
+                    // Uniformly scale the height based on instantaneous cup-to-cup distance
+                    pos.array[idx] = originalY * (currentLength / rLen);
+                }
+                pos.needsUpdate = true;
+                spring.geometry.computeVertexNormals();
+            });
+
+            // Bottom Springs (Mass 1 to Mass 2)
+            botSprings.forEach(spring => {
+                const pos = spring.geometry.attributes.position;
+                const orig = spring.userData.originalPositions;
+                const rLen = spring.userData.restLength;
+                
+                const bottomY = mass2RestY + y2 + 0.34;
+                const topY = mass1RestY + y1 - 0.34;
+                const currentLength = topY - bottomY;
+                
+                spring.position.y = bottomY; // Anchor precisely to bottom cup
+                
+                for (let i = 0; i < pos.count; i++) {
+                    const idx = i * 3 + 1;
+                    const originalY = orig[idx];
+                    pos.array[idx] = originalY * (currentLength / rLen);
+                }
+                pos.needsUpdate = true;
+                spring.geometry.computeVertexNormals();
+            });
+
+            // 6. Dynamically update trailing signal cable splines
+            cableCurve1.points[0].copy(new THREE.Vector3(0.6, movingGroup1.position.y + 0.3 + 0.15, 0.3));
+            cableCurve1.points[1].copy(new THREE.Vector3(1.2, movingGroup1.position.y - 0.2, 1.0));
+            cableMesh1.geometry.dispose();
+            cableMesh1.geometry = new THREE.TubeGeometry(cableCurve1, 20, 0.015, 8, false);
+
+            cableCurve2.points[0].copy(new THREE.Vector3(0.6, movingGroup2.position.y + 0.3 + 0.15, 0.3));
+            cableCurve2.points[1].copy(new THREE.Vector3(1.2, movingGroup2.position.y - 0.2, 1.0));
+            cableMesh2.geometry.dispose();
+            cableMesh2.geometry = new THREE.TubeGeometry(cableCurve2, 20, 0.015, 8, false);
+
+            controls.update();
+            renderer.render(scene, camera);
+            labelRenderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
